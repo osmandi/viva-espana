@@ -1,0 +1,36 @@
+{
+  "name": "viva-espana",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.14"
+    },
+    "ghcr.io/devcontainers/features/azure-cli:1": {},
+    "ghcr.io/devcontainers/features/terraform:1": {}
+  },
+  "mounts": [
+    "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind",
+    "source=${localEnv:HOME}/.claude.json,target=/home/vscode/.claude.json,type=bind",
+    "source=${localEnv:HOME}/.azure,target=/home/vscode/.azure,type=bind"
+  ],
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends gnupg2 && pip install uv && uv sync",
+  "forwardPorts": [8000],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.debugpy",
+        "ms-windows-ai-studio.windows-ai-studio",
+        "hashicorp.terraform",
+        "ms-vscode.azurecli"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "chat.disableAIFeatures": true,
+        "github.copilot.enable": { "*": false }
+      }
+    }
+  }
+}

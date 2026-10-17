@@ -1,0 +1,4 @@
+storage_account_name = "<storage-account>"
+container_name       = "<container>"
+key                  = "viva-espana.tfstate"
+use_azuread_auth     = true
