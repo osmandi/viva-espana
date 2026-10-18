@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Viva España · Guía turística</title>
+  <style>
+    :root {
+      --bg: #fdf6f0;
+      --bg-grad: #e8f3fb;
+      --card: #ffffff;
+      --text: #4a4458;
+      --muted: #8a8399;
+      --user: #cfe8f7;
+      --user-text: #2f4a5e;
+      --bot: #fde8ef;
+      --accent: #b8a9e8;
+      --accent-hover: #a595de;
+      --mint: #d5f0e3;
+      --butter: #fff4cc;
+      --border: #efe6f5;
+      --error: #ffd9d9;
+      --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      color: var(--text);
+      background: linear-gradient(160deg, var(--bg) 0%, var(--bg-grad) 100%);
+      display: flex;
+      justify-content: center;
+    }
+    .app {
+      width: 100%;
+      max-width: 820px;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+      gap: 12px;
+    }
+    header {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      box-shadow: 0 4px 16px rgba(184, 169, 232, .15);
+    }
+    header .logo {
+      width: 42px; height: 42px; flex: none;
+      border-radius: 14px;
+      background: linear-gradient(135deg, var(--butter), var(--bot));
+      display: grid; place-items: center;
+      font-size: 22px;
+    }
+    header h1 { font-size: 1.1rem; margin: 0; }
+    header p { margin: 2px 0 0; font-size: .85rem; color: var(--muted); }
+
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      box-shadow: 0 4px 16px rgba(184, 169, 232, .12);
+    }
+    .empty {
+      margin: auto;
+      text-align: center;
+      color: var(--muted);
+      max-width: 420px;
+    }
+    .empty .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px; }
+    .chip {
+      border: 1px solid var(--border);
+      background: var(--mint);
+      color: var(--text);
+      padding: 8px 12px;
+      border-radius: 999px;
+      font: inherit; font-size: .85rem;
+      cursor: pointer;
+    }
+    .chip:hover { filter: brightness(.97); }
+
+    .msg {
+      max-width: 88%;
+      padding: 10px 14px;
+      border-radius: var(--radius);
+      line-height: 1.5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .msg.user { align-self: flex-end; background: var(--user); color: var(--user-text); border-bottom-right-radius: 6px; }
+    .msg.bot  { align-self: flex-start; background: var(--bot); border-bottom-left-radius: 6px; }
+    .msg.error { background: var(--error); }
+    .msg .sources {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: var(--butter);
+      border-radius: 12px;
+      font-size: .85rem;
+    }
+    .msg .sources strong { display: block; margin-bottom: 4px; }
+    .msg a { color: #6b5bbd; }
+    .typing::after { content: "▍"; animation: blink 1s steps(2) infinite; color: var(--accent); }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    form {
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px;
+      box-shadow: 0 4px 16px rgba(184, 169, 232, .15);
+    }
+    textarea {
+      flex: 1;
+      resize: none;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 10px 12px;
+      font: inherit;
+      color: var(--text);
+      background: #fffdfb;
+      max-height: 140px;
+      outline: none;
+    }
+    textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(184, 169, 232, .25); }
+    button.send {
+      border: 0;
+      border-radius: 14px;
+      background: var(--accent);
+      color: #fff;
+      font: inherit; font-weight: 600;
+      padding: 11px 18px;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    button.send:hover:not(:disabled) { background: var(--accent-hover); }
+    button.send:disabled { opacity: .55; cursor: not-allowed; }
+
+    /* Llamada de voz */
+    button.call {
+      flex: none;
+      width: 46px; height: 46px;
+      border: 0;
+      border-radius: 50%;
+      background: var(--mint);
+      color: #3f7a5f;
+      display: grid; place-items: center;
+      cursor: pointer;
+      transition: background .15s, transform .1s;
+    }
+    button.call:hover:not(:disabled) { filter: brightness(.96); }
+    button.call:active { transform: scale(.95); }
+    button.call:disabled { opacity: .55; cursor: wait; }
+    button.call svg { width: 22px; height: 22px; fill: currentColor; }
+    button.call.active { background: #ffc9cf; color: #b0384a; }
+    button.call .icon-end { display: none; }
+    button.call.active .icon-start { display: none; }
+    button.call.active .icon-end { display: block; }
+
+    .callbar {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      background: var(--mint);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      font-size: .9rem;
+    }
+    .callbar.visible { display: flex; }
+    .callbar .dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: #6cc59a;
+      animation: pulse 1.4s ease-in-out infinite;
+    }
+    .callbar.speaking .dot { background: var(--accent); }
+    .callbar .timer { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--muted); }
+    @keyframes pulse { 50% { transform: scale(1.5); opacity: .5; } }
+    .msg .tag { display: block; font-size: .72rem; color: var(--muted); margin-bottom: 2px; }
+
+    @media (max-width: 520px) {
+      .app { padding: 8px; gap: 8px; }
+      header { padding: 10px 12px; }
+      #chat { padding: 12px; }
+      .msg { max-width: 94%; }
+      button.send { padding: 11px 14px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div class="logo" aria-hidden="true">🌅</div>
+      <div>
+        <h1>Viva España</h1>
+        <p>Pregunta sobre las guías turísticas de España</p>
+      </div>
+    </header>
+
+    <section id="chat" aria-live="polite">
+      <div class="empty" id="empty">
+        <div style="font-size:2rem">🗺️</div>
+        <p>¿Qué quieres saber? Respondo solo con la información de las guías turísticas.</p>
+        <div class="chips">
+          <button type="button" class="chip">¿Qué son las Fallas de Valencia?</button>
+          <button type="button" class="chip">¿Qué puedo ver en Bilbao?</button>
+          <button type="button" class="chip">¿Cómo llegar a España en tren?</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="callbar" id="callbar" aria-live="polite">
+      <span class="dot" aria-hidden="true"></span>
+      <span id="callStatus">Conectando…</span>
+      <span class="timer" id="callTimer">00:00</span>
+    </div>
+
+    <form id="form">
+      <button class="call" id="callBtn" type="button" aria-label="Llamar" title="Llamar">
+        <svg class="icon-start" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.57a1 1 0 0 1-.25 1z"/></svg>
+        <svg class="icon-end" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1a1 1 0 0 1-.56.9 11.5 11.5 0 0 0-2.66 1.85 1 1 0 0 1-1.41 0L.29 13.08a1 1 0 0 1 0-1.41A16.9 16.9 0 0 1 12 7c4.57 0 8.71 1.8 11.71 4.67a1 1 0 0 1 0 1.41l-2.48 2.49a1 1 0 0 1-1.41 0 11.3 11.3 0 0 0-2.67-1.85 1 1 0 0 1-.56-.9v-3.1A15 15 0 0 0 12 9z"/></svg>
+      </button>
+      <textarea id="input" rows="1" maxlength="2000" placeholder="Escribe tu pregunta…" aria-label="Pregunta" required></textarea>
+      <button class="send" id="send" type="submit">Enviar</button>
+    </form>
+  </main>
+
+  <script>
+    const chat = document.getElementById("chat");
+    const form = document.getElementById("form");
+    const input = document.getElementById("input");
+    const sendBtn = document.getElementById("send");
+    const SOURCES_MARK = "\n\nFuentes:\n";
+
+    function addMessage(role, text = "") {
+      const empty = document.getElementById("empty");
+      if (empty) empty.remove();
+      const el = document.createElement("div");
+      el.className = "msg " + role;
+      el.textContent = text;
+      chat.appendChild(el);
+      chat.scrollTop = chat.scrollHeight;
+      return el;
+    }
+
+    // Convierte las URLs en enlaces sin interpretar HTML (todo se inserta como texto)
+    function appendLinkified(parent, text) {
+      const re = /https?:\/\/[^\s)]+/g;
+      let last = 0, m;
+      while ((m = re.exec(text))) {
+        parent.append(text.slice(last, m.index));
+        const a = document.createElement("a");
+        a.href = m[0]; a.textContent = m[0];
+        a.target = "_blank"; a.rel = "noopener noreferrer";
+        parent.append(a);
+        last = m.index + m[0].length;
+      }
+      parent.append(text.slice(last));
+    }
+
+    // Separa la respuesta de las referencias ("Fuentes:") y las muestra en un recuadro
+    function renderBot(el, text, done) {
+      const i = text.indexOf(SOURCES_MARK);
+      el.textContent = "";
+      el.classList.toggle("typing", !done);
+      if (i === -1) { el.append(text); return; }
+      el.append(text.slice(0, i));
+      const box = document.createElement("div");
+      box.className = "sources";
+      const title = document.createElement("strong");
+      title.textContent = "Fuentes";
+      box.append(title);
+      appendLinkified(box, text.slice(i + SOURCES_MARK.length).trim());
+      el.append(box);
+    }
+
+    let chatAbort = null;  // permite cortar el streaming de /chat (al salir de la página)
+
+    async function ask(message) {
+      addMessage("user", message);
+      const bot = addMessage("bot");
+      bot.classList.add("typing");
+      sendBtn.disabled = true;
+      let text = "";
+      const controller = new AbortController();
+      chatAbort = controller;
+      try {
+        const res = await fetch("/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message }),
+          signal: controller.signal,
+        });
+        if (!res.ok) throw new Error("Error " + res.status);
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          text += decoder.decode(value, { stream: true });
+          renderBot(bot, text, false);
+          chat.scrollTop = chat.scrollHeight;
+        }
+        renderBot(bot, text + decoder.decode(), true);
+      } catch (err) {
+        bot.classList.remove("typing");
+        if (err.name === "AbortError") return;  // cortado a propósito: no es un error
+        bot.classList.add("error");
+        bot.textContent = text || "No se pudo obtener la respuesta. Inténtalo de nuevo.";
+      } finally {
+        if (chatAbort === controller) chatAbort = null;
+        sendBtn.disabled = false;
+        input.focus();
+        chat.scrollTop = chat.scrollHeight;
+      }
+    }
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const message = input.value.trim();
+      if (!message || sendBtn.disabled) return;
+      input.value = "";
+      autoGrow();
+      ask(message);
+    });
+
+    // Enter envía; Shift+Enter inserta un salto de línea
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        form.requestSubmit();
+      }
+    });
+
+    function autoGrow() {
+      input.style.height = "auto";
+      input.style.height = Math.min(input.scrollHeight, 140) + "px";
+    }
+    input.addEventListener("input", autoGrow);
+
+    // ---------------------------------------------------------------------
+    // Llamada de voz: micrófono -> /voice (PCM16 24 kHz) -> gpt-realtime -> altavoz
+    // ---------------------------------------------------------------------
+    const callBtn = document.getElementById("callBtn");
+    const callbar = document.getElementById("callbar");
+    const callStatus = document.getElementById("callStatus");
+    const callTimer = document.getElementById("callTimer");
+    const RATE = 24000;
+
+    // AudioWorklet: remuestrea el micrófono a 24 kHz y envía bloques PCM16 de ~40 ms
+    const WORKLET = `
+      class PcmCapture extends AudioWorkletProcessor {
+        constructor() { super(); this.ratio = sampleRate / ${RATE}; this.pos = 0; this.inBuf = []; this.out = []; }
+        process(inputs) {
+          const ch = inputs[0] && inputs[0][0];
+          if (!ch) return true;
+          for (let i = 0; i < ch.length; i++) this.inBuf.push(ch[i]);
+          while (this.pos + 1 < this.inBuf.length) {
+            const i = Math.floor(this.pos), f = this.pos - i;
+            this.out.push(this.inBuf[i] * (1 - f) + this.inBuf[i + 1] * f);
+            this.pos += this.ratio;
+          }
+          const drop = Math.floor(this.pos);
+          this.inBuf = this.inBuf.slice(drop);
+          this.pos -= drop;
+          if (this.out.length >= 960) {
+            const pcm = new Int16Array(this.out.length);
+            for (let i = 0; i < this.out.length; i++) {
+              const v = Math.max(-1, Math.min(1, this.out[i]));
+              pcm[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+            }
+            this.port.postMessage(pcm.buffer, [pcm.buffer]);
+            this.out = [];
+          }
+          return true;
+        }
+      }
+      registerProcessor("pcm-capture", PcmCapture);`;
+
+    let call = null;  // { ws, ctx, stream, node, sources, playHead, timer, start }
+
+    function setCallUI(state, text) {
+      callBtn.classList.toggle("active", state !== "idle");
+      callBtn.setAttribute("aria-label", state === "idle" ? "Llamar" : "Colgar");
+      callBtn.title = state === "idle" ? "Llamar" : "Colgar";
+      callbar.classList.toggle("visible", state !== "idle");
+      if (text) callStatus.textContent = text;
+    }
+
+    function updateSpeaking() {
+      if (!call || !call.ready) return;
+      const speaking = call.sources.size > 0;
+      callbar.classList.toggle("speaking", speaking);
+      callStatus.textContent = speaking ? "Hablando…" : call.listening ? "Escuchando…" : "Presentándose…";
+    }
+
+    function playPcm(buffer) {
+      if (!call) return;
+      const bytes = buffer.byteLength - (buffer.byteLength % 2);
+      const pcm = new Int16Array(buffer, 0, bytes / 2);
+      const f32 = new Float32Array(pcm.length);
+      for (let i = 0; i < pcm.length; i++) f32[i] = pcm[i] / 0x8000;
+      const audio = call.ctx.createBuffer(1, f32.length, RATE);
+      audio.copyToChannel(f32, 0);
+      const src = call.ctx.createBufferSource();
+      src.buffer = audio;
+      src.connect(call.ctx.destination);
+      const t = Math.max(call.ctx.currentTime, call.playHead);
+      src.start(t);
+      call.playHead = t + audio.duration;
+      call.sources.add(src);
+      src.onended = () => { call && call.sources.delete(src); updateSpeaking(); };
+      updateSpeaking();
+    }
+
+    function stopPlayback() {
+      if (!call) return;
+      call.sources.forEach((s) => { try { s.stop(); } catch (e) {} });
+      call.sources.clear();
+      call.playHead = 0;
+      updateSpeaking();
+    }
+
+    function addSources(fuentes) {
+      const el = addMessage("bot");
+      const box = document.createElement("div");
+      box.className = "sources";
+      box.style.marginTop = "0";
+      const title = document.createElement("strong");
+      title.textContent = "Fuentes consultadas";
+      box.append(title);
+      appendLinkified(box, fuentes.map((f) =>
+        `[${f.id}] ${f.guia || "Guía"}${f.seccion ? " — " + f.seccion : ""}${f.url ? "\n    " + f.url : ""}`
+      ).join("\n"));
+      el.append(box);
+    }
+
+    function onServerMessage(msg) {
+      if (!call) return;  // llegó después de colgar
+      switch (msg.type) {
+        case "ready":
+          call.ready = true;
+          call.start = Date.now();
+          call.timer = setInterval(() => {
+            const s = Math.floor((Date.now() - call.start) / 1000);
+            callTimer.textContent = String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+          }, 1000);
+          setCallUI("active", "Presentándose…");
+          break;
+        case "listening":
+          call.listening = true;
+          updateSpeaking();
+          break;
+        case "user": addMessage("user", "🎙️ " + msg.text); break;
+        case "assistant": addMessage("bot", msg.text); break;
+        case "interrupt": stopPlayback(); break;
+        case "status": callStatus.textContent = msg.text; break;
+        case "sources": if (msg.fuentes && msg.fuentes.length) addSources(msg.fuentes); break;
+        case "error": addMessage("bot", msg.text).classList.add("error"); break;
+      }
+    }
+
+    let callAttempt = 0;  // invalida un intento de llamada si se cuelga mientras conecta
+
+    async function startCall() {
+      const attempt = ++callAttempt;
+      const cancelled = () => attempt !== callAttempt;
+      setCallUI("connecting", "Conectando…");
+      callTimer.textContent = "00:00";
+      let stream = null, ctx = null;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        ctx = new AudioContext();
+        const url = URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" }));
+        await ctx.audioWorklet.addModule(url);
+        URL.revokeObjectURL(url);
+        if (cancelled()) throw new DOMException("Llamada cancelada", "AbortError");
+        const node = new AudioWorkletNode(ctx, "pcm-capture", { numberOfInputs: 1, numberOfOutputs: 0 });
+        ctx.createMediaStreamSource(stream).connect(node);
+
+        const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/voice");
+        ws.binaryType = "arraybuffer";
+        call = { ws, ctx, stream, node, sources: new Set(), playHead: 0, ready: false, listening: false, timer: null };
+
+        const isCurrent = () => call !== null && call.ws === ws;
+        // El micrófono se envía solo cuando el agente terminó de presentarse ("listening")
+        node.port.onmessage = (e) => { if (isCurrent() && call.listening && ws.readyState === WebSocket.OPEN) ws.send(e.data); };
+        ws.onmessage = (e) => {
+          if (!isCurrent()) return;
+          if (typeof e.data === "string") onServerMessage(JSON.parse(e.data));
+          else playPcm(e.data);
+        };
+        ws.onclose = () => { if (isCurrent()) endCall(false); };
+        ws.onerror = () => { if (isCurrent()) addMessage("bot", "No se pudo conectar la llamada.").classList.add("error"); };
+      } catch (err) {
+        if (!call) {  // falló o se canceló antes de crear la llamada: libera el micrófono
+          if (stream) stream.getTracks().forEach((t) => t.stop());
+          if (ctx) ctx.close();
+        }
+        if (err && err.name === "AbortError") return;  // colgó mientras conectaba
+        const text = err && err.name === "NotAllowedError"
+          ? "Necesito permiso para usar el micrófono."
+          : "No se pudo iniciar la llamada.";
+        addMessage("bot", text).classList.add("error");
+        endCall(false);
+      }
+    }
+
+    function endCall(notify = true) {
+      callAttempt++;  // cancela un startCall que siga conectando
+      if (!call) { setCallUI("idle"); return; }
+      const c = call;
+      call = null;
+      clearInterval(c.timer);
+      // Desconecta los manejadores: los mensajes y el audio que sigan llegando se descartan
+      c.ws.onmessage = c.ws.onclose = c.ws.onerror = null;
+      c.node.port.onmessage = null;
+      try { c.node.disconnect(); } catch (e) {}
+      c.sources.forEach((s) => { try { s.stop(); } catch (e) {} });
+      c.sources.clear();
+      if (notify && c.ws.readyState === WebSocket.OPEN) {
+        try { c.ws.send(JSON.stringify({ type: "hangup" })); } catch (e) {}
+      }
+      try { c.ws.close(1000, "colgado"); } catch (e) {}
+      c.stream.getTracks().forEach((t) => t.stop());
+      c.ctx.close();
+      setCallUI("idle");
+    }
+
+    callBtn.addEventListener("click", () => (callBtn.classList.contains("active") ? endCall() : startCall()));
+
+    // Al recargar o cerrar la página: cuelga la llamada y corta el streaming del chat
+    window.addEventListener("pagehide", () => {
+      endCall();
+      if (chatAbort) chatAbort.abort();
+    });
+    // Si el navegador restaura la página desde su caché (botón atrás), se recarga limpia
+    window.addEventListener("pageshow", (e) => { if (e.persisted) location.reload(); });
+
+    document.querySelectorAll(".chip").forEach((chip) =>
+      chip.addEventListener("click", () => ask(chip.textContent))
+    );
+  </script>
+</body>
+</html>

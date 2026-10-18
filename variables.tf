@@ -1,6 +1,12 @@
 variable "location" {
   type        = string
   description = "Región de Azure donde se desplegarán los recursos."
+  default     = "eastus2"
+}
+
+variable "search_location" {
+  type        = string
+  description = "Región de AI Search. Puede diferir de location: eastus2 no tenía capacidad para servicios de Search nuevos."
   default     = "eastus"
 }
 

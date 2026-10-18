@@ -60,26 +60,6 @@ resource "azurerm_cognitive_account_project" "this" {
   }
 }
 
-
-
-# Rerank: priorizar la cantidad de documentos obtenidos del RAG
-# Solo se ofrece como GlobalStandard (no existe DataZoneStandard)
-resource "azurerm_cognitive_deployment" "cohere_rerank_v4_fast" {
-  name                 = "Cohere-rerank-v4.0-fast"
-  cognitive_account_id = azurerm_cognitive_account.foundry.id
-
-  model {
-    format  = "Cohere"
-    name    = "Cohere-rerank-v4.0-fast"
-    version = "1"
-  }
-
-  sku {
-    name     = "GlobalStandard"
-    capacity = 1
-  }
-}
-
 # Despliegue del modelo gpt-4.1-mini
 # Sin cuota en DataZoneStandard (0); se usa Standard (procesa en la región del recurso)
 resource "azurerm_cognitive_deployment" "gpt_4_1_mini" {
@@ -94,7 +74,7 @@ resource "azurerm_cognitive_deployment" "gpt_4_1_mini" {
 
   sku {
     name     = "Standard"
-    capacity = 1
+    capacity = 150
   }
 }
 
@@ -111,7 +91,25 @@ resource "azurerm_cognitive_deployment" "text_embedding_3_small" {
 
   sku {
     name     = "DataZoneStandard"
-    capacity = 1
+    capacity = 50
+  }
+}
+
+# Despliegue del modelo de voz para la llamada desde el navegador (/voice)
+# Único modelo realtime con cuota en la región: gpt-realtime-mini (GlobalStandard, 40)
+resource "azurerm_cognitive_deployment" "gpt_realtime_mini" {
+  name                 = "gpt-realtime-mini"
+  cognitive_account_id = azurerm_cognitive_account.foundry.id
+
+  model {
+    format  = "OpenAI"
+    name    = "gpt-realtime-mini"
+    version = "2025-12-15"
+  }
+
+  sku {
+    name     = "GlobalStandard"
+    capacity = 10
   }
 }
 
@@ -151,9 +149,10 @@ resource "azurerm_role_assignment" "me_storage_blob" {
 resource "azurerm_search_service" "this" {
   name                         = "search-${var.foundry_name}-${random_string.suffix.result}"
   resource_group_name          = azurerm_resource_group.this.name
-  location                     = azurerm_resource_group.this.location
+  location                     = var.search_location # región propia: ver variables.tf
   sku                          = "basic"
-  local_authentication_enabled = false # solo Entra ID, sin API keys
+  local_authentication_enabled = false  # solo Entra ID, sin API keys
+  semantic_search_sku          = "free" # semantic ranker: 1000 consultas/mes gratis
 }
 
 # Crear índices (plano de datos de gestión del servicio)

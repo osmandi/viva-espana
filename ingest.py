@@ -13,10 +13,12 @@ Autenticación: Microsoft Entra ID (az login). No usa claves.
 
 import argparse
 import asyncio
+import csv
 import json
 import os
 import re
 import sys
+import time
 from pathlib import Path, PurePosixPath
 
 import tiktoken
@@ -25,19 +27,26 @@ from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
 from azure.search.documents.aio import SearchClient
 from azure.search.documents.indexes.aio import SearchIndexClient
 from azure.search.documents.indexes.models import (
+    BM25SimilarityAlgorithm,
     HnswAlgorithmConfiguration,
+    HnswParameters,
     SearchableField,
     SearchField,
     SearchFieldDataType,
     SearchIndex,
+    SemanticConfiguration,
+    SemanticField,
+    SemanticPrioritizedFields,
+    SemanticSearch,
     SimpleField,
     VectorSearch,
     VectorSearchProfile,
 )
 from azure.search.documents.models import VectorizedQuery
 from azure.storage.blob.aio import BlobServiceClient
-from openai import AsyncAzureOpenAI
+from openai import AsyncAzureOpenAI, RateLimitError
 
+FUENTES_CSV = "guias-turisticas/fuentes.csv"  # metadatos de cada guía
 INDEX_CTX = "guias-ctx"
 INDEX_BASE = "guias-base"
 
@@ -48,16 +57,63 @@ CHAT_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1-mini")
 MAX_TOKENS = 600  # tamaño máximo de un fragmento (sin contar el contexto)
 OVERLAP_TOKENS = 80  # solapamiento entre fragmentos consecutivos de una sección
 MIN_TOKENS = 30  # los fragmentos más cortos se descartan (cabeceras sueltas)
-MAX_DOC_TOKENS = 60_000  # tope del documento que se envía al LLM para el contexto
+# Contexto del LLM: el documento completo se envía una vez por grupo de fragmentos y el
+# modelo devuelve un contexto para cada uno (JSON). Enviarlo una vez por fragmento
+# multiplicaba los tokens por ~15 y agotaba los tokens por minuto del despliegue.
+CONTEXT_GROUP_SIZE = 12  # fragmentos por llamada
+CONTEXT_TOKENS_PER_ITEM = 120  # salida máxima por contexto
+MAX_FULL_DOC_TOKENS = 100_000  # documentos mayores: índice de títulos + extracto del grupo
+CONTEXT_WINDOW_TOKENS = 20_000  # tamaño del extracto en documentos mayores
+OUTLINE_MAX_TOKENS = 600  # índice de títulos del documento
+CONTEXT_TPM = int(os.getenv("CONTEXT_TPM", "120000"))  # por debajo de la capacidad (150K TPM)
+CONTEXT_RETRIES = 6
 EMBED_BATCH = 16
 UPLOAD_BATCH = 100
-LLM_CONCURRENCY = 8
+LLM_CONCURRENCY = 4
 
 enc = tiktoken.get_encoding("cl100k_base")  # tokenizador de text-embedding-3-small
 
 
 def n_tokens(text: str) -> int:
     return len(enc.encode(text))
+
+
+# ---------------------------------------------------------------------------
+# Metadatos de las guías (fuentes.csv)
+# ---------------------------------------------------------------------------
+
+
+def stem_key(nombre: str) -> str:
+    """Clave de cruce: nombre sin extensión (el CSV lista .pdf y en Blob están los .md)."""
+    return PurePosixPath(nombre).stem.casefold()
+
+
+def load_fuentes(path: str) -> dict[str, dict]:
+    """Lee fuentes.csv y lo indexa por nombre de archivo sin extensión."""
+    if not Path(path).exists():
+        print(f"aviso: no existe {path}; se indexa sin metadatos", file=sys.stderr)
+        return {}
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        fuentes = {}
+        for row in csv.DictReader(f):
+            row = {k.strip(): (v or "").strip() for k, v in row.items()}
+            fuentes[stem_key(row["archivo"])] = row
+    return fuentes
+
+
+def metadata_fields(meta: dict | None) -> dict:
+    """Campos de metadatos que se guardan en cada fragmento del índice."""
+    if not meta:
+        return {}
+    return {
+        "fuente_titulo": meta["titulo"],
+        "fuente_url": meta["url"],
+        "organismo": meta["organismo"],
+        "anio": int(meta["anio"]) if meta["anio"].isdigit() else None,
+        "region": meta["region"],
+        "tipo": meta["tipo"],
+        "publico": meta["publico"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -148,15 +204,73 @@ def chunk_document(markdown: str) -> list[dict]:
 # Contexto (LLM) y embeddings
 # ---------------------------------------------------------------------------
 
-CONTEXT_PROMPT = """<documento>
+CONTEXT_PROMPT = """{guia}
+<documento>
 {documento}
 </documento>
-Aquí está un fragmento de ese documento:
-<fragmento>
-{fragmento}
-</fragmento>
-Escribe una o dos frases breves que sitúen este fragmento dentro del documento \
-(lugar, tema, sección) para mejorar su búsqueda. Responde solo con ese contexto."""
+Estos son fragmentos de ese documento, numerados:
+<fragmentos>
+{fragmentos}
+</fragmentos>
+Para CADA fragmento escribe una o dos frases breves que lo sitúen dentro del documento \
+(lugar, tema, sección) para mejorar su búsqueda. Devuelve un contexto por cada id."""
+
+# Structured outputs: obliga a devolver exactamente esta forma de JSON
+CONTEXT_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "contextos",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "contextos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"id": {"type": "integer"}, "contexto": {"type": "string"}},
+                        "required": ["id", "contexto"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["contextos"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+class TokenRateLimiter:
+    """Limita los tokens enviados por minuto para no provocar errores 429."""
+
+    def __init__(self, tokens_per_minute: int) -> None:
+        self.limit = tokens_per_minute
+        self.sent: list[tuple[float, int]] = []  # (instante, tokens) del último minuto
+        self.lock = asyncio.Lock()
+
+    async def acquire(self, tokens: int) -> None:
+        tokens = min(tokens, self.limit)
+        async with self.lock:
+            while True:
+                now = time.monotonic()
+                self.sent = [(t, n) for t, n in self.sent if now - t < 60]
+                if sum(n for _, n in self.sent) + tokens <= self.limit:
+                    self.sent.append((now, tokens))
+                    return
+                await asyncio.sleep(60 - (now - self.sent[0][0]) + 0.1)
+
+
+def outline(markdown: str) -> str:
+    """Índice de títulos del documento (# a ###), recortado a OUTLINE_MAX_TOKENS."""
+    titles = [line.strip() for line in markdown.splitlines() if HEADER_RE.match(line)]
+    return enc.decode(enc.encode("\n".join(titles))[:OUTLINE_MAX_TOKENS])
+
+
+def excerpt(doc_tokens: list[int], center: int) -> str:
+    """Extracto de CONTEXT_WINDOW_TOKENS tokens centrado en la posición del fragmento."""
+    start = max(0, min(center - CONTEXT_WINDOW_TOKENS // 2, len(doc_tokens) - CONTEXT_WINDOW_TOKENS))
+    return enc.decode(doc_tokens[start : start + CONTEXT_WINDOW_TOKENS])
 
 
 class Clients:
@@ -168,35 +282,81 @@ class Clients:
                 self.credential, "https://cognitiveservices.azure.com/.default"
             ),
             api_version="2025-04-01-preview",
-            max_retries=8,  # reintenta 429/5xx respetando Retry-After
+            max_retries=3,  # reintentos rápidos del SDK; los 429 largos los gestiona contextualizar
         )
         self.llm_slots = asyncio.Semaphore(LLM_CONCURRENCY)
+        self.llm_tpm = TokenRateLimiter(CONTEXT_TPM)
+        self.context_failures = 0  # fragmentos que quedaron sin contexto tras los reintentos
 
     async def close(self) -> None:
         await self.openai.close()
         await self.credential.close()
 
 
-async def contextualizar(c: Clients, documento: str, fragmento: str) -> str:
-    # El documento va primero y es idéntico en todas las llamadas del mismo archivo:
-    # permite el prompt caching de Azure OpenAI.
-    async with c.llm_slots:
+async def contextualizar_grupo(c: Clients, guia: str, documento: str, fragmentos: list[str]) -> list[str]:
+    """Pide al LLM un contexto por fragmento en una sola llamada. Devuelve "" en los que fallen."""
+    contextos = [""] * len(fragmentos)
+    pendientes = list(range(len(fragmentos)))
+    error: Exception | None = None
+
+    for intento in range(1, CONTEXT_RETRIES + 1):
+        lista = "\n\n".join(f"[{i + 1}]\n{fragmentos[i]}" for i in pendientes)
+        prompt = CONTEXT_PROMPT.format(guia=guia, documento=documento, fragmentos=lista)
+        max_tokens = CONTEXT_TOKENS_PER_ITEM * len(pendientes) + 200
+        # Azure cuenta en el límite los tokens de entrada más max_tokens
+        await c.llm_tpm.acquire(n_tokens(prompt) + max_tokens)
         try:
-            r = await c.openai.chat.completions.create(
-                model=CHAT_DEPLOYMENT,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": CONTEXT_PROMPT.format(documento=documento, fragmento=fragmento),
-                    }
-                ],
-                max_tokens=150,
-                temperature=0,
-            )
-            return (r.choices[0].message.content or "").strip()
-        except Exception as e:  # un fragmento sin contexto es mejor que abortar el archivo
-            print(f"    aviso: sin contexto para un fragmento ({type(e).__name__})", file=sys.stderr)
-            return ""
+            async with c.llm_slots:
+                r = await c.openai.chat.completions.create(
+                    model=CHAT_DEPLOYMENT,
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format=CONTEXT_SCHEMA,
+                    max_tokens=max_tokens,
+                    temperature=0,
+                )
+            items = json.loads(r.choices[0].message.content or "{}")["contextos"]
+            for item in items:
+                i = item["id"] - 1
+                if i in pendientes and item["contexto"].strip():
+                    contextos[i] = item["contexto"].strip()
+            # Si el modelo omitió algún id, se reintenta solo con esos
+            pendientes = [i for i in pendientes if not contextos[i]]
+            if not pendientes:
+                return contextos
+        except RateLimitError as e:
+            error = e
+            retry_after = e.response.headers.get("retry-after")
+            await asyncio.sleep(float(retry_after) if retry_after else min(60, 5 * 2**intento))
+        except (json.JSONDecodeError, KeyError, TypeError) as e:  # respuesta truncada o mal formada
+            error = e
+
+    # Un fragmento sin contexto es mejor que abortar el archivo; se avisa al final
+    c.context_failures += len(pendientes)
+    motivo = type(error).__name__ if error else "contextos omitidos por el modelo"
+    print(f"    aviso: {len(pendientes)} fragmentos sin contexto ({motivo})", file=sys.stderr)
+    return contextos
+
+
+async def contextualizar_documento(c: Clients, markdown: str, fragmentos: list[str], meta: dict | None) -> list[str]:
+    """Contexto de todos los fragmentos de un documento, en grupos de CONTEXT_GROUP_SIZE."""
+    guia = f"Guía: {meta['titulo']} ({meta['region']})" if meta else ""
+    limpio = re.sub(r"<!--.*?-->", "", markdown, flags=re.S)
+    doc_tokens = enc.encode(limpio)
+    completo = len(doc_tokens) <= MAX_FULL_DOC_TOKENS
+
+    def documento_para(grupo: range) -> str:
+        if completo:
+            return limpio
+        # Documento muy grande: índice de títulos + extracto centrado en el grupo
+        pos = limpio.find(fragmentos[grupo[0]][:120])
+        centro = len(enc.encode(limpio[:pos])) if pos >= 0 else len(doc_tokens) * grupo[0] // len(fragmentos)
+        return f"Índice de títulos:\n{outline(limpio)}\n\nExtracto:\n{excerpt(doc_tokens, centro)}"
+
+    grupos = [range(i, min(i + CONTEXT_GROUP_SIZE, len(fragmentos))) for i in range(0, len(fragmentos), CONTEXT_GROUP_SIZE)]
+    resultados = await asyncio.gather(
+        *(contextualizar_grupo(c, guia, documento_para(g), [fragmentos[i] for i in g]) for g in grupos)
+    )
+    return [ctx for grupo in resultados for ctx in grupo]
 
 
 async def embed(c: Clients, texts: list[str]) -> list[list[float]]:
@@ -220,9 +380,18 @@ def index_definition(name: str) -> SearchIndex:
         fields=[
             SimpleField(name="chunk_id", type=SearchFieldDataType.STRING, key=True),
             SimpleField(name="parent_id", type=SearchFieldDataType.STRING, filterable=True),
-            SearchableField(name="title", type=SearchFieldDataType.STRING),
-            SearchableField(name="chunk", type=SearchFieldDataType.STRING),  # texto indexado
+            # Campos de texto para BM25, con el analizador de español (plurales, acentos, raíces)
+            SearchableField(name="title", type=SearchFieldDataType.STRING, analyzer_name="es.microsoft"),
+            SearchableField(name="chunk", type=SearchFieldDataType.STRING, analyzer_name="es.microsoft"),
             SimpleField(name="chunk_raw", type=SearchFieldDataType.STRING),  # fragmento original
+            # Metadatos de fuentes.csv: filtrables (y facetables) para acotar las búsquedas
+            SearchableField(name="fuente_titulo", type=SearchFieldDataType.STRING, analyzer_name="es.microsoft"),
+            SimpleField(name="fuente_url", type=SearchFieldDataType.STRING),
+            SimpleField(name="organismo", type=SearchFieldDataType.STRING, filterable=True, facetable=True),
+            SimpleField(name="anio", type=SearchFieldDataType.INT32, filterable=True, sortable=True, facetable=True),
+            SearchableField(name="region", type=SearchFieldDataType.STRING, filterable=True, facetable=True),
+            SimpleField(name="tipo", type=SearchFieldDataType.STRING, filterable=True, facetable=True),
+            SimpleField(name="publico", type=SearchFieldDataType.STRING, filterable=True, facetable=True),
             SearchField(
                 name="text_vector",
                 type=SearchFieldDataType.Collection(SearchFieldDataType.SINGLE),
@@ -231,9 +400,33 @@ def index_definition(name: str) -> SearchIndex:
                 vector_search_profile_name="perfil-vec",
             ),
         ],
+        # BM25 es el algoritmo por defecto; se declara para fijar sus parámetros
+        similarity=BM25SimilarityAlgorithm(k1=1.2, b=0.75),
         vector_search=VectorSearch(
-            algorithms=[HnswAlgorithmConfiguration(name="hnsw")],
+            algorithms=[
+                HnswAlgorithmConfiguration(
+                    name="hnsw",
+                    parameters=HnswParameters(m=4, ef_construction=400, ef_search=500, metric="cosine"),
+                )
+            ],
             profiles=[VectorSearchProfile(name="perfil-vec", algorithm_configuration_name="hnsw")],
+        ),
+        # Semantic ranker: reordena los mejores resultados por significado (query_type="semantic")
+        semantic_search=SemanticSearch(
+            default_configuration_name="semantica",
+            configurations=[
+                SemanticConfiguration(
+                    name="semantica",
+                    prioritized_fields=SemanticPrioritizedFields(
+                        title_field=SemanticField(field_name="title"),
+                        content_fields=[SemanticField(field_name="chunk")],
+                        keywords_fields=[
+                            SemanticField(field_name="fuente_titulo"),
+                            SemanticField(field_name="region"),
+                        ],
+                    ),
+                )
+            ],
         ),
     )
 
@@ -283,21 +476,25 @@ async def read_documents(args, credential) -> list[tuple[str, str]]:
 # ---------------------------------------------------------------------------
 
 
-async def ingest_document(c: Clients, search: SearchClient, nombre: str, markdown: str, con_contexto: bool):
+async def ingest_document(
+    c: Clients, search: SearchClient, nombre: str, markdown: str, con_contexto: bool, meta: dict | None
+):
     fragmentos = chunk_document(markdown)
     if not fragmentos:
         print(f"  {nombre}: sin fragmentos útiles, se omite")
         return
 
     if con_contexto:
-        documento = enc.decode(enc.encode(markdown)[:MAX_DOC_TOKENS])
-        contextos = await asyncio.gather(*(contextualizar(c, documento, f["text"]) for f in fragmentos))
+        contextos = await contextualizar_documento(c, markdown, [f["text"] for f in fragmentos], meta)
     else:
         contextos = [""] * len(fragmentos)
 
-    # Prefijo estructural (ruta de títulos) + contexto del LLM + fragmento
+    # Cabecera de la guía (metadatos) + ruta de títulos + contexto del LLM + fragmento
+    cabecera = (
+        f"Guía: {meta['titulo']} · {meta['region']} · {meta['tipo']}" if meta else ""
+    )
     textos = [
-        "\n\n".join(p for p in (f["title"], ctx, f["text"]) if p)
+        "\n\n".join(p for p in (cabecera, f["title"], ctx, f["text"]) if p)
         for f, ctx in zip(fragmentos, contextos)
     ]
     vectores = await embed(c, textos)
@@ -318,19 +515,21 @@ async def ingest_document(c: Clients, search: SearchClient, nombre: str, markdow
             "chunk": textos[i],
             "chunk_raw": f["text"],
             "text_vector": vectores[i],
+            **metadata_fields(meta),
         }
         for i, f in enumerate(fragmentos)
     ]
     for i in range(0, len(docs), UPLOAD_BATCH):
         await search.upload_documents(docs[i : i + UPLOAD_BATCH])
-    print(f"  {nombre}: {len(docs)} fragmentos indexados")
+    print(f"  {nombre}: {len(docs)} fragmentos indexados" + ("" if meta else " (SIN metadatos)"))
 
 
-def show_dry_run(nombre: str, markdown: str) -> None:
+def show_dry_run(nombre: str, markdown: str, meta: dict | None) -> None:
     fragmentos = chunk_document(markdown)
     sizes = [n_tokens(f["text"]) for f in fragmentos]
     print(f"\n{nombre}: {len(fragmentos)} fragmentos"
           + (f" (tokens: min {min(sizes)}, máx {max(sizes)})" if sizes else ""))
+    print("  metadatos: " + (json.dumps(metadata_fields(meta), ensure_ascii=False) if meta else "NO ENCONTRADOS en fuentes.csv"))
     for i, f in enumerate(fragmentos):
         preview = " ".join(f["text"].split())[:90]
         print(f"  [{i:02d}] {sizes[i]:>4} tok | {f['title'] or '(sin título)'} | {preview}…")
@@ -390,14 +589,17 @@ async def main() -> None:
     p.add_argument("--recrear", action="store_true", help="borra y recrea el índice antes de indexar")
     p.add_argument("--dry-run", action="store_true", help="solo muestra los fragmentos, sin llamar a OpenAI ni a Search")
     p.add_argument("--local", metavar="CARPETA", help="lee los .md de una carpeta local en lugar de Blob Storage")
+    p.add_argument("--fuentes", default=FUENTES_CSV, metavar="CSV", help=f"CSV con los metadatos de las guías (por defecto: {FUENTES_CSV})")
     p.add_argument("--evaluar", metavar="PREGUNTAS.JSON", help="compara guias-base y guias-ctx con las preguntas del archivo")
     args = p.parse_args()
+
+    fuentes = {} if args.evaluar else load_fuentes(args.fuentes)
 
     if args.dry_run:
         credential = DefaultAzureCredential()
         try:
             for nombre, md in await read_documents(args, credential):
-                show_dry_run(nombre, md)
+                show_dry_run(nombre, md, fuentes.get(stem_key(nombre)))
         finally:
             await credential.close()
         return
@@ -420,7 +622,16 @@ async def main() -> None:
             await ensure_index(index_client, index_name, args.recrear)
         async with SearchClient(endpoint, index_name, c.credential) as search:
             for nombre, md in docs:
-                await ingest_document(c, search, nombre, md, not args.sin_contexto)
+                await ingest_document(
+                    c, search, nombre, md, not args.sin_contexto, fuentes.get(stem_key(nombre))
+                )
+        if c.context_failures:
+            print(
+                f"\nATENCIÓN: {c.context_failures} fragmentos se indexaron SIN contexto "
+                "(cuota o errores del modelo). Vuelve a ejecutar el script para esos archivos "
+                "antes de evaluar: la comparación con guias-base no sería válida.",
+                file=sys.stderr,
+            )
     finally:
         await c.close()
 
