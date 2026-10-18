@@ -400,8 +400,19 @@
       if (text) callStatus.textContent = text;
     }
 
+    // Cuelga cuando termina de sonar el audio en cola (la despedida del agente)
+    function colgarAlTerminarAudio(c) {
+      if (call !== c) return;  // ya colgada
+      if (c.sources.size === 0 && c.ctx.currentTime >= c.playHead) {
+        endCall();
+        addMessage("bot", "📞 Llamada finalizada.");
+      } else {
+        setTimeout(() => colgarAlTerminarAudio(c), 200);
+      }
+    }
+
     function updateSpeaking() {
-      if (!call || !call.ready) return;
+      if (!call || !call.ready || call.ending) return;
       const speaking = call.sources.size > 0;
       callbar.classList.toggle("speaking", speaking);
       callStatus.textContent = speaking ? "Hablando…" : call.listening ? "Escuchando…" : "Presentándose…";
@@ -463,6 +474,13 @@
         case "listening":
           call.listening = true;
           updateSpeaking();
+          break;
+        case "end":
+          // El agente se despidió: deja de enviar el micrófono y cuelga al terminar de sonar
+          call.listening = false;
+          call.ending = true;
+          callStatus.textContent = "Finalizando llamada…";
+          colgarAlTerminarAudio(call);
           break;
         case "user": addMessage("user", "🎙️ " + msg.text); break;
         case "assistant": addMessage("bot", msg.text); break;
