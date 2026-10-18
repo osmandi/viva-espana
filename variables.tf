@@ -1,7 +1,7 @@
 variable "location" {
   type        = string
   description = "Región de Azure donde se desplegarán los recursos."
-  default     = "eastus2"
+  default     = "eastus"
 }
 
 variable "resource_group_name" {
@@ -18,4 +18,15 @@ variable "foundry_name" {
 variable "project_name" {
   type    = string
   default = "proj-viva-espana"
+}
+
+variable "storage_account_name" {
+  type        = string
+  description = "Nombre de la cuenta de almacenamiento existente donde se guarda el texto extraído de los PDFs."
+}
+
+variable "storage_resource_group_name" {
+  type        = string
+  description = "Resource group de la cuenta de almacenamiento. Si es null, se usa resource_group_name."
+  default     = null
 }

@@ -1,0 +1,10 @@
+[
+  {
+    "pregunta": "¿A qué hora abre el Real Alcázar de Sevilla?",
+    "esperado": "Real Alcázar"
+  },
+  {
+    "pregunta": "¿Cuánto cuesta la entrada al palacio de Sevilla?",
+    "esperado": "Real Alcázar"
+  }
+]

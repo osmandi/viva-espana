@@ -1,0 +1,7 @@
+# Copia este archivo a terraform.tfvars (no se sube a Git) y completa los valores.
+
+# Cuenta de almacenamiento existente donde main.py guarda el texto extraído de los PDFs
+storage_account_name = "<storage-account>"
+
+# Solo si la cuenta está en un resource group distinto al de resource_group_name
+# storage_resource_group_name = "<resource-group>"

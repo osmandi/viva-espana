@@ -115,26 +115,87 @@ resource "azurerm_cognitive_deployment" "text_embedding_3_small" {
   }
 }
 
+# Azure AI Document Intelligence: extracción de texto de PDFs (prebuilt-layout)
+resource "azurerm_cognitive_account" "docintel" {
+  name                  = "docintel-${var.foundry_name}-${random_string.suffix.result}"
+  location              = azurerm_resource_group.this.location
+  resource_group_name   = azurerm_resource_group.this.name
+  kind                  = "FormRecognizer"
+  sku_name              = "S0"
+  custom_subdomain_name = "docintel-${var.foundry_name}-${random_string.suffix.result}"
+}
+
+# Acceso con Entra ID (az login) para el usuario que ejecuta Terraform
+data "azurerm_client_config" "current" {}
+
+resource "azurerm_role_assignment" "me_docintel_user" {
+  scope                = azurerm_cognitive_account.docintel.id
+  role_definition_name = "Cognitive Services User"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
+# Cuenta de almacenamiento existente (no la crea Terraform) donde main.py guarda el Markdown
+data "azurerm_storage_account" "docs" {
+  name                = var.storage_account_name
+  resource_group_name = coalesce(var.storage_resource_group_name, var.resource_group_name)
+}
+
+# Rol de datos necesario para escribir blobs con Entra ID (Owner/Contributor no bastan)
+resource "azurerm_role_assignment" "me_storage_blob" {
+  scope                = data.azurerm_storage_account.docs.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
+# Azure AI Search: índice vectorial + BM25 de los fragmentos de las guías
+resource "azurerm_search_service" "this" {
+  name                         = "search-${var.foundry_name}-${random_string.suffix.result}"
+  resource_group_name          = azurerm_resource_group.this.name
+  location                     = azurerm_resource_group.this.location
+  sku                          = "basic"
+  local_authentication_enabled = false # solo Entra ID, sin API keys
+}
+
+# Crear índices (plano de datos de gestión del servicio)
+resource "azurerm_role_assignment" "me_search_contributor" {
+  scope                = azurerm_search_service.this.id
+  role_definition_name = "Search Service Contributor"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
+# Leer y escribir documentos en los índices
+resource "azurerm_role_assignment" "me_search_data" {
+  scope                = azurerm_search_service.this.id
+  role_definition_name = "Search Index Data Contributor"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
 # Endpoint base para el cliente OpenAI/Azure usado por main.py
 locals {
   foundry_openai_endpoint = "https://${azurerm_cognitive_account.foundry.custom_subdomain_name}.services.ai.azure.com"
+  docintel_endpoint       = azurerm_cognitive_account.docintel.endpoint
+  search_endpoint         = "https://${azurerm_search_service.this.name}.search.windows.net"
 }
 
-# Guarda AZURE_OPENAI_ENDPOINT en .env tras cada apply en que cambie el endpoint.
-# Solo reemplaza esa variable: el resto del archivo se conserva.
+# Guarda los endpoints en .env tras cada apply en que cambien.
+# Solo reemplaza esas variables: el resto del archivo se conserva.
 resource "terraform_data" "env_file" {
-  triggers_replace = local.foundry_openai_endpoint
+  triggers_replace = [local.foundry_openai_endpoint, local.docintel_endpoint, local.search_endpoint]
 
   provisioner "local-exec" {
     interpreter = ["bash", "-c"]
     environment = {
-      ENV_FILE = "${path.module}/.env"
-      ENDPOINT = local.foundry_openai_endpoint
+      ENV_FILE                       = "${path.module}/.env"
+      AZURE_OPENAI_ENDPOINT          = local.foundry_openai_endpoint
+      DOCUMENT_INTELLIGENCE_ENDPOINT = local.docintel_endpoint
+      SEARCH_ENDPOINT                = local.search_endpoint
     }
     command = <<-EOT
       touch "$ENV_FILE"
-      { grep -v '^AZURE_OPENAI_ENDPOINT=' "$ENV_FILE" || true; echo "AZURE_OPENAI_ENDPOINT=$ENDPOINT"; } > "$ENV_FILE.tmp"
-      mv "$ENV_FILE.tmp" "$ENV_FILE"
+      for var in AZURE_OPENAI_ENDPOINT DOCUMENT_INTELLIGENCE_ENDPOINT SEARCH_ENDPOINT; do
+        { grep -v "^$var=" "$ENV_FILE" || true; echo "$var=$${!var}"; } > "$ENV_FILE.tmp"
+        mv "$ENV_FILE.tmp" "$ENV_FILE"
+      done
     EOT
   }
 }
@@ -153,4 +214,12 @@ output "foundry_project_id" {
 
 output "foundry_openai_endpoint" {
   value = local.foundry_openai_endpoint
+}
+
+output "document_intelligence_endpoint" {
+  value = local.docintel_endpoint
+}
+
+output "search_endpoint" {
+  value = local.search_endpoint
 }
