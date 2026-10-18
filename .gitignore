@@ -19,3 +19,6 @@ backend.hcl
 *.tfplan
 crash.log
 .terraform.tfstate.lock.info
+
+# PDF input
+guias-turisticas
