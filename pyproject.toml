@@ -3,5 +3,8 @@ name = "viva-espana"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
+    "aiohttp>=3.14.5",
+    "azure-identity>=1.26.0",
     "fastapi[standard]>=0.143.3",
+    "openai>=3.35.0",
 ]
