@@ -36,3 +36,21 @@ variable "storage_resource_group_name" {
   description = "Resource group de la cuenta de almacenamiento. Si es null, se usa resource_group_name."
   default     = null
 }
+
+variable "app_name" {
+  type        = string
+  description = "Nombre del Container App (y de la imagen) de la API de FastAPI."
+  default     = "viva-espana"
+}
+
+variable "app_min_replicas" {
+  type        = number
+  description = "Réplicas mínimas del Container App. Con 0 se apaga sin tráfico, pero la primera llamada de voz espera al arranque."
+  default     = 1
+}
+
+variable "app_max_replicas" {
+  type        = number
+  description = "Réplicas máximas del Container App."
+  default     = 2
+}

@@ -1,0 +1,27 @@
+# Entorno y secretos
+.env
+.env.*
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tf
+*.tfvars
+*.tfstate
+*.tfstate.*
+backend.hcl*
+
+# Repositorio y material que no necesita la imagen
+.git/
+.devcontainer/
+docs/
+guias-turisticas/
+ingest.py
+*.sh
+*.md
+preguntas.example.json
