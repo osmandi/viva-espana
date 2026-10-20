@@ -271,8 +271,9 @@ flowchart TD
 
 | Archivo | Contenido |
 |---|---|
-| [main.tf](main.tf) | Recursos, roles, escritura del `.env` y outputs |
-| [variables.tf](variables.tf) | `location`, `search_location`, `resource_group_name`, `foundry_name`, `project_name`, `storage_account_name`, `storage_resource_group_name` |
+| [main.tf](main.tf) | Foundry, modelos, Document Intelligence, AI Search, roles, escritura del `.env` y outputs |
+| [container_app.tf](container_app.tf) | Despliegue de la API: registro de contenedores, identidad, roles, Log Analytics y Container App (ver [Despliegue en Azure Container Apps](#despliegue-en-azure-container-apps)) |
+| [variables.tf](variables.tf) | `location`, `search_location`, `resource_group_name`, `foundry_name`, `project_name`, `storage_account_name`, `storage_resource_group_name`, `app_name`, `app_min_replicas`, `app_max_replicas` |
 | `backend.hcl.example` | Estado remoto en Blob Storage con autenticación Entra ID |
 | `terraform.tfvars.example` | Cuenta de almacenamiento donde se guarda el Markdown |
 
@@ -290,6 +291,7 @@ flowchart TD
 - Azure CLI con sesión iniciada (`az login`) y permisos para crear los recursos
 - Terraform 1.5 o superior
 - Una cuenta de almacenamiento de Azure existente
+- Proveedor `Microsoft.App` registrado en la suscripción (solo para el despliegue en Container Apps, ver [más abajo](#despliegue-en-azure-container-apps))
 - `curl` y `jq` (para `upload-pdfs.sh`)
 
 El repositorio incluye un *dev container* con todo lo anterior ([.devcontainer/](.devcontainer/)).
@@ -304,7 +306,7 @@ terraform init -backend-config=backend.hcl
 terraform apply
 ```
 
-`apply` crea los recursos y escribe los endpoints en `.env`. Añade a mano en ese archivo el nombre de la cuenta de almacenamiento:
+`apply` crea los recursos (incluido el contenedor de la API, ver [Despliegue en Azure Container Apps](#despliegue-en-azure-container-apps)) y escribe los endpoints en `.env`. Añade a mano en ese archivo el nombre de la cuenta de almacenamiento:
 
 ```bash
 STORAGE_ACCOUNT_NAME=<tu-cuenta-de-almacenamiento>
@@ -354,7 +356,9 @@ Muestra el porcentaje de preguntas cuya respuesta aparece en el top 5 de cada í
 
 ## Despliegue en Azure Container Apps
 
-`terraform apply` también despliega la API como contenedor ([container_app.tf](container_app.tf) y [Dockerfile](Dockerfile)). No hace falta Docker en local.
+La API de FastAPI se ejecuta como contenedor en **Azure Container Apps**. Lo define [container_app.tf](container_app.tf) y la imagen se describe en el [Dockerfile](Dockerfile). El mismo `terraform apply` crea la infraestructura, construye la imagen y publica la aplicación. No hace falta Docker en local.
+
+### Qué se despliega
 
 ```mermaid
 flowchart LR
@@ -372,12 +376,110 @@ flowchart LR
     USR["Navegador"] -- "HTTPS y WSS" --> APP
 ```
 
-- **Imagen:** `az acr build` la construye dentro del registro. La etiqueta es un hash de `Dockerfile`, `pyproject.toml`, `uv.lock`, `main.py`, `tools.py` y `static/index.html`: cuando cambia alguno de ellos, el siguiente `terraform apply` construye una imagen nueva y crea una revisión nueva.
-- **Sin claves:** el contenedor usa una identidad administrada (`AZURE_CLIENT_ID` se pasa como variable de entorno para que `DefaultAzureCredential` la elija). El registro no tiene usuario administrador.
-- **HTTPS:** la URL pública (`terraform output app_url`) es HTTPS, requisito del navegador para usar el micrófono. El WebSocket `/voice` pasa por la misma entrada.
-- **Réplicas:** `app_min_replicas = 1` por defecto, para que la primera llamada de voz no espere al arranque. Puedes ajustarlo con `app_min_replicas` y `app_max_replicas`.
-- **Primer despliegue:** Terraform espera 60 s a que se propaguen los roles antes de crear el Container App. Si falla al descargar la imagen, repite `terraform apply`.
-- **Carga de guías:** el índice y los PDFs siguen cargándose igual que en local, con `upload-pdfs.sh <carpeta> <app_url>` e `ingest.py`.
+| Recurso | Para qué sirve |
+|---|---|
+| `azurerm_container_registry` | Registro privado de imágenes (SKU Basic, sin usuario administrador) |
+| `azurerm_user_assigned_identity` | Identidad con la que se ejecuta la API, sin claves |
+| `azurerm_role_assignment` (×5) | `AcrPull`, `Cognitive Services OpenAI User`, `Cognitive Services User`, `Storage Blob Data Contributor` y `Search Index Data Reader` |
+| `time_sleep` | Espera 60 s a que se propaguen los roles antes de crear el Container App |
+| `terraform_data.app_image` | Ejecuta `az acr build` para construir la imagen en el propio registro |
+| `azurerm_log_analytics_workspace` | Registros del contenedor |
+| `azurerm_container_app_environment` | Entorno donde corre la aplicación |
+| `azurerm_container_app` | La API, con entrada HTTPS pública y sondas de salud sobre `/health` |
+
+La identidad es **de usuario** (no del sistema) para poder darle permisos antes de crear el Container App: así puede descargar la imagen desde el primer arranque. Se indica en `AZURE_CLIENT_ID` para que `DefaultAzureCredential` la elija.
+
+### Pasos para desplegar
+
+1. **Registrar el proveedor** (una sola vez por suscripción). Sin él, `apply` falla con `MissingSubscriptionRegistration: ... namespace 'Microsoft.App'`:
+
+   ```bash
+   az provider register --namespace Microsoft.App
+   az provider show -n Microsoft.App --query registrationState -o tsv   # espera a "Registered"
+   ```
+
+2. **Aplicar Terraform** (con `az login` hecho; `az acr build` usa esa sesión):
+
+   ```bash
+   terraform init -backend-config=backend.hcl
+   terraform apply
+   ```
+
+3. **Abrir la aplicación:**
+
+   ```bash
+   terraform output app_url      # https://viva-espana.<entorno>.<región>.azurecontainerapps.io
+   ```
+
+4. **Cargar las guías** apuntando a la URL pública, en lugar de `localhost`:
+
+   ```bash
+   ./upload-pdfs.sh ./carpeta-con-pdfs "$(terraform output -raw app_url)"
+   uv run --env-file .env python ingest.py
+   ```
+
+   `ingest.py` se sigue ejecutando en local con tu usuario, no en el contenedor.
+
+### Flujo del despliegue y de las actualizaciones
+
+```mermaid
+sequenceDiagram
+    actor Dev as Desarrollador
+    participant TF as Terraform
+    participant ACR as Container Registry
+    participant CA as Container App
+
+    Dev->>TF: terraform apply
+    TF->>TF: calcula la etiqueta (hash del código)
+    alt La etiqueta es nueva
+        TF->>ACR: az acr build (Dockerfile + código)
+        ACR-->>TF: imagen viva-espana:hash
+    end
+    TF->>TF: espera 60 s (roles)
+    TF->>CA: crea o actualiza la revisión con la imagen nueva
+    CA->>ACR: descarga la imagen (AcrPull)
+    CA-->>Dev: app_url (HTTPS)
+```
+
+- **Etiqueta de la imagen:** es un hash de `Dockerfile`, `pyproject.toml`, `uv.lock`, `main.py`, `tools.py` y `static/index.html`. Cuando cambia alguno de ellos, el siguiente `terraform apply` construye una imagen nueva y crea una revisión nueva del Container App.
+- **Cambios que no redespliegan:** editar el README, los scripts, `ingest.py` o los archivos de Terraform no cambia el hash, así que no se reconstruye la imagen.
+
+### Configuración
+
+| Variable de Terraform | Por defecto | Descripción |
+|---|---|---|
+| `app_name` | `viva-espana` | Nombre del Container App y de la imagen |
+| `app_min_replicas` | `1` | Réplicas mínimas. Con `0` se apaga sin tráfico, pero la primera llamada de voz espera al arranque |
+| `app_max_replicas` | `2` | Réplicas máximas |
+
+Las variables de entorno del contenedor (`AZURE_OPENAI_ENDPOINT`, `DOCUMENT_INTELLIGENCE_ENDPOINT`, `SEARCH_ENDPOINT`, `STORAGE_ACCOUNT_NAME` y `AZURE_CLIENT_ID`) las rellena Terraform; no hay que configurarlas a mano. El contenedor usa 0,5 vCPU y 1 GiB de memoria.
+
+La URL es **HTTPS**, requisito del navegador para usar el micrófono, y el WebSocket `/voice` pasa por la misma entrada.
+
+### Dónde verlo en el portal de Azure
+
+En el grupo de recursos `IA` aparecen:
+
+- **`viva-espana`** (Container App): la URL de la aplicación, las revisiones, las réplicas y el *Log stream* con la salida en directo.
+- **`acrvivaespana…`** (Container Registry): en *Repositorios* está la imagen.
+- **`cae-viva-espana`** (Container Apps Environment) y **`log-viva-espana-…`** (Log Analytics): entorno y registros.
+
+Desde la terminal:
+
+```bash
+az containerapp logs show -g IA -n viva-espana --follow
+az containerapp revision list -g IA -n viva-espana -o table
+```
+
+### Problemas frecuentes
+
+| Síntoma | Causa y solución |
+|---|---|
+| `MissingSubscriptionRegistration ... Microsoft.App` | Falta registrar el proveedor (paso 1) |
+| `log_analytics_workspace_id can only be set when logs_destination ...` | El entorno necesita `logs_destination = "log-analytics"`, que ya está en [container_app.tf](container_app.tf) |
+| El contenedor no descarga la imagen | Los roles aún no se habían propagado: repite `terraform apply` |
+| `az acr build` falla por ACR Tasks | Algunas suscripciones restringen ACR Tasks. Construye la imagen con Docker en otra máquina y súbela al registro con la misma etiqueta |
+| 404 al leer las claves de AI Search tras crearlo | Retraso de propagación del servicio: repite `terraform apply` |
 
 ## Variables de entorno
 
@@ -442,6 +544,7 @@ curl -N -X POST http://localhost:8000/chat \
 ├── main.tf                   # Infraestructura en Azure
 ├── container_app.tf          # ACR, identidad, roles y Container App
 ├── Dockerfile                # Imagen de la API
+├── .dockerignore             # Archivos que no entran en la imagen
 ├── variables.tf              # Variables de Terraform
 ├── backend.hcl.example       # Plantilla del estado remoto
 ├── terraform.tfvars.example  # Plantilla de variables
